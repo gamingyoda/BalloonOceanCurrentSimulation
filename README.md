@@ -2,6 +2,8 @@
 
 気球が海上に落下した後の漂流を **CMEMS/ECMWF の海流・風・波データ → OpenDrift (OceanDrift)** で計算するツールです。Web UI と CLI のどちらでも実行できます。
 
+![Test Image 1](sample_display.png)
+
 ## 特徴
 - CMEMS/ECMWF のサブセット取得、NetCDF 検証、OpenDrift 実行、出力生成を分離し、頑健に再試行。
 - 取得データの時間範囲が欠けていても可能な範囲で自動リトライ。
