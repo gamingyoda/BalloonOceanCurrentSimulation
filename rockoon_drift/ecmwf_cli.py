@@ -131,26 +131,46 @@ def _open_grib_u10v10(grib_path: Path) -> xr.Dataset:
 def _to_time_series(ds: xr.Dataset) -> xr.Dataset:
     """Convert (time, step, lat, lon) to (time, lat, lon) with time=valid_time."""
     # ds typically contains dims: time (init) length 1, step length N, latitude, longitude.
-    if "step" in ds.dims:
-        # ensure valid_time exists
-        if "valid_time" in ds.variables:
-            vt = ds["valid_time"]
-            if "time" in vt.dims:
-                vt = vt.isel(time=0)
-        else:
-            # fallback: time + step
-            init = pd.to_datetime(ds["time"].values[0])
-            vt = xr.DataArray(
-                [init + pd.to_timedelta(int(s / 1e9), unit="s") for s in ds["step"].values],
-                dims=("step",),
-            )
+    if "step" not in ds.dims:
+        return ds
 
-        ds2 = ds.isel(time=0).drop_vars([v for v in ["time", "valid_time"] if v in ds.variables])
-        ds2 = ds2.assign_coords(time=("step", pd.to_datetime(vt.values)))
-        ds2 = ds2.swap_dims({"step": "time"}).drop_vars("step")
-        return ds2
+    def _init_time() -> pd.Timestamp:
+        # cfgrib may expose init time as scalar coord, not a dim
+        for key in ["time", "forecast_reference_time", "dataDate"]:
+            if key in ds.coords:
+                val = ds.coords[key]
+                try:
+                    return pd.to_datetime(val.values.ravel()[0])
+                except Exception:
+                    continue
+        return pd.Timestamp(0)
 
-    return ds
+    if "valid_time" in ds.variables:
+        vt = ds["valid_time"]
+        if "time" in vt.dims:
+            vt = vt.isel(time=0)
+    else:
+        init = _init_time()
+        vt = xr.DataArray(
+            [init + pd.to_timedelta(int(s / 1e9), unit="s") for s in ds["step"].values],
+            dims=("step",),
+        )
+
+    # If there is no time dim, don't isel; just drop helper coords if present
+    drop_keys: list[str] = []
+    for v in ["time", "valid_time"]:
+        if v in ds.variables or v in ds.coords:
+            drop_keys.append(v)
+
+    ds2 = ds
+    if "time" in ds.dims:
+        ds2 = ds.isel(time=0)
+    ds2 = ds2.drop_vars([v for v in drop_keys if v in ds2.variables], errors="ignore")
+    ds2 = ds2.drop_vars([v for v in drop_keys if v in ds2.coords], errors="ignore")
+
+    ds2 = ds2.assign_coords(time=("step", pd.to_datetime(vt.values)))
+    ds2 = ds2.swap_dims({"step": "time"}).drop_vars("step")
+    return ds2
 
 def _normalize_lon(ds: xr.Dataset) -> xr.Dataset:
     """Convert longitude to [-180, 180) and sort."""

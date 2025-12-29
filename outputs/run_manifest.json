@@ -1,5 +1,5 @@
 {
-  "created_utc": "2025-12-29T01:48:25",
+  "created_utc": "2025-12-29T03:25:42",
   "params": {
     "lon": 135.0,
     "lat": 33.5,
@@ -17,7 +17,9 @@
       4.0
     ],
     "n_per": 200,
-    "radius_km": 120.0
+    "radius_km": 120.0,
+    "wind_source_requested": "auto",
+    "wind_source_used": "ecmwf"
   },
   "datasets": {
     "currents": {
@@ -28,10 +30,10 @@
       }
     },
     "wind": {
-      "path": null,
+      "path": "copernicus-cache/ecmwf_wind_33fdba605e.nc",
       "time": {
-        "tmin": "2025-12-27 05:00:00",
-        "tmax": "2025-12-27 23:00:00"
+        "tmin": "2025-12-29 00:00:00",
+        "tmax": "2025-12-30 00:00:00"
       }
     },
     "waves": {

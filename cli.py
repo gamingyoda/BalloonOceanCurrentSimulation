@@ -22,9 +22,11 @@ from rockoon_drift.constants import (
 from rockoon_drift.timeutil import parse_time_utc, Window, window_with_margin, intersect_windows, adjust_requested_to_available
 from rockoon_drift.netcdf_utils import nc_time_bounds
 from rockoon_drift.cmems_cli import make_request, subset_to_netcdf
+from rockoon_drift.ecmwf_cli import download_ecmwf_wind_netcdf
 from rockoon_drift.opendrift_runner import DriftRunConfig, run_drift
 from rockoon_drift.outputs import export_csvs, export_pretty_map
 from rockoon_drift.manifest import RunManifest, write_manifest
+from rockoon_drift.geo import bbox_around
 
 def _parse_windage_list(s: str) -> list[float]:
     out: list[float] = []
@@ -48,6 +50,13 @@ def main():
     ap.add_argument("--curr-u", type=str, default=CURR_UVAR_DEFAULT)
     ap.add_argument("--curr-v", type=str, default=CURR_VVAR_DEFAULT)
 
+    ap.add_argument(
+        "--wind-source",
+        type=str,
+        choices=["auto", "cmems", "ecmwf"],
+        default="auto",
+        help="wind data source (auto=try CMEMS then fallback to ECMWF)",
+    )
     ap.add_argument("--wind-id", type=str, default=WIND_DATASET_DEFAULT)
     ap.add_argument("--wind-u", type=str, default=WIND_UVAR_DEFAULT)
     ap.add_argument("--wind-v", type=str, default=WIND_VVAR_DEFAULT)
@@ -82,6 +91,7 @@ def main():
     requested = Window(t0, t0 + timedelta(hours=args.hours))
     # Download with margins (±6h) like your previous script.
     dl_window = window_with_margin(center=t0, duration_hours=args.hours, margin_hours=6.0)
+    bbox = bbox_around(args.lon, args.lat, args.radius_km)
 
     cache_dir = Path(args.cache_dir)
     outdir = Path(args.outdir)
@@ -101,23 +111,55 @@ def main():
 
     # --- Wind (optional) ---
     wind_nc = None
+    wind_source_used = None
     if args.const_wind_only:
         print("[INFO] wind download skipped (const wind only mode)")
     elif not args.no_wind:
-        wind_req = make_request(
-            dataset_id=args.wind_id,
-            lon=args.lon, lat=args.lat,
-            start_utc=dl_window.start, end_utc=dl_window.end,
-            radius_km=args.radius_km,
-            variables=(args.wind_u, args.wind_v),
-        )
-        try:
-            wind_nc = subset_to_netcdf(wind_req, cache_dir=cache_dir, force_download=args.force_download)
-        except Exception as e:
-            raise RuntimeError(
-                "wind download failed and fallback to constant wind is disabled. "
-                "Use --const-wind-only or --no-wind if you want to proceed without wind data."
-            ) from e
+        def _download_wind_cmems() -> Path:
+            wind_req = make_request(
+                dataset_id=args.wind_id,
+                lon=args.lon, lat=args.lat,
+                start_utc=dl_window.start, end_utc=dl_window.end,
+                radius_km=args.radius_km,
+                variables=(args.wind_u, args.wind_v),
+            )
+            return subset_to_netcdf(wind_req, cache_dir=cache_dir, force_download=args.force_download)
+
+        def _download_wind_ecmwf() -> Path:
+            return download_ecmwf_wind_netcdf(
+                bbox=bbox,
+                start_utc=dl_window.start,
+                end_utc=dl_window.end,
+                out_dir=cache_dir,
+                force_download=args.force_download,
+            )
+
+        if args.wind_source == "ecmwf":
+            wind_nc = _download_wind_ecmwf()
+            wind_source_used = "ecmwf"
+        elif args.wind_source == "cmems":
+            try:
+                wind_nc = _download_wind_cmems()
+                wind_source_used = "cmems"
+            except Exception as e:
+                raise RuntimeError(
+                    "wind download failed and fallback to constant wind is disabled. "
+                    "Use --const-wind-only or --no-wind if you want to proceed without wind data."
+                ) from e
+        else:  # auto
+            try:
+                wind_nc = _download_wind_cmems()
+                wind_source_used = "cmems"
+            except Exception as e_cmems:
+                print("[INFO] CMEMS wind failed; falling back to ECMWF (auto mode)")
+                try:
+                    wind_nc = _download_wind_ecmwf()
+                    wind_source_used = "ecmwf"
+                except Exception as e_ecmwf:
+                    raise RuntimeError(
+                        "wind download failed in auto mode (CMEMS then ECMWF). "
+                        "Use --const-wind-only or --no-wind if you want to proceed without wind data."
+                    ) from e_ecmwf
 
     # --- Waves/Stokes (optional) ---
     waves_nc = None
@@ -143,26 +185,42 @@ def main():
             ) from e
 
     # --- Compute common time window across downloaded datasets ---
-    bounds = []
-    ds_meta = {
-        "currents": {"path": str(currents_nc), "time": None},
-        "wind": {"path": str(wind_nc) if wind_nc else None, "time": None},
-        "waves": {"path": str(waves_nc) if waves_nc else None, "time": None},
-    }
+    def _build_bounds(curr_nc, wind_path, waves_path):
+        b_list = []
+        meta = {
+            "currents": {"path": str(curr_nc), "time": None},
+            "wind": {"path": str(wind_path) if wind_path else None, "time": None},
+            "waves": {"path": str(waves_path) if waves_path else None, "time": None},
+        }
 
-    c_b = nc_time_bounds(currents_nc); bounds.append(("currents", c_b))
-    ds_meta["currents"]["time"] = {"tmin": str(c_b.tmin), "tmax": str(c_b.tmax)}
-    if wind_nc:
-        w_b = nc_time_bounds(wind_nc); bounds.append(("wind", w_b))
-        ds_meta["wind"]["time"] = {"tmin": str(w_b.tmin), "tmax": str(w_b.tmax)}
-    if waves_nc:
-        s_b = nc_time_bounds(waves_nc); bounds.append(("waves", s_b))
-        ds_meta["waves"]["time"] = {"tmin": str(s_b.tmin), "tmax": str(s_b.tmax)}
+        c_b = nc_time_bounds(curr_nc); b_list.append(("currents", c_b))
+        meta["currents"]["time"] = {"tmin": str(c_b.tmin), "tmax": str(c_b.tmax)}
+        if wind_path:
+            w_b = nc_time_bounds(wind_path); b_list.append(("wind", w_b))
+            meta["wind"]["time"] = {"tmin": str(w_b.tmin), "tmax": str(w_b.tmax)}
+        if waves_path:
+            s_b = nc_time_bounds(waves_path); b_list.append(("waves", s_b))
+            meta["waves"]["time"] = {"tmin": str(s_b.tmin), "tmax": str(s_b.tmax)}
+        return b_list, meta
 
     def _common(active_bounds):
         return intersect_windows([Window(b.tmin, b.tmax) for _, b in active_bounds]) if active_bounds else None
 
+    bounds, ds_meta = _build_bounds(currents_nc, wind_nc, waves_nc)
     common = _common(bounds)
+
+    if common is None and args.wind_source == "auto" and wind_source_used == "cmems" and (not args.no_wind) and (not args.const_wind_only):
+        print("[INFO] No common time window; retry wind with ECMWF (auto fallback)")
+        wind_nc = download_ecmwf_wind_netcdf(
+            bbox=bbox,
+            start_utc=dl_window.start,
+            end_utc=dl_window.end,
+            out_dir=cache_dir,
+            force_download=args.force_download,
+        )
+        wind_source_used = "ecmwf"
+        bounds, ds_meta = _build_bounds(currents_nc, wind_nc, waves_nc)
+        common = _common(bounds)
 
     if common is None:
         detail = " | ".join([f"{name}=[{b.tmin}..{b.tmax}]" for name, b in bounds])
@@ -227,6 +285,8 @@ def main():
             "windage": cfg.windage_percents,
             "n_per": cfg.n_per_member,
             "radius_km": args.radius_km,
+            "wind_source_requested": args.wind_source,
+            "wind_source_used": wind_source_used,
         },
         datasets=ds_meta,
         outputs={"netcdf": str(result_nc), "csv_mean": str(csv_mean), "csv_all": str(csv_all)},
