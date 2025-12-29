@@ -1,0 +1,8 @@
+opendrift==1.14.3
+xarray
+netcdf4
+pandas
+numpy
+copernicus-marine-client
+psutil
+ecmwf-opendata

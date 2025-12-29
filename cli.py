@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Rockoon sea drift simulator: CMEMS -> OpenDrift (OceanDrift)
+
+1) Download CMEMS subsets (currents + optional wind + optional waves/Stokes)
+2) Validate NetCDF time coverage and required variables
+3) Run OpenDrift ensemble with windage
+4) Export NetCDF + CSV + (optional) pretty PNG
+"""
+
+from __future__ import annotations
+import argparse
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from rockoon_drift.constants import (
+    CURR_DATASET_DEFAULT, CURR_UVAR_DEFAULT, CURR_VVAR_DEFAULT,
+    WIND_DATASET_DEFAULT, WIND_UVAR_DEFAULT, WIND_VVAR_DEFAULT,
+    WAVES_DATASET_DEFAULT, WAVES_UVAR_DEFAULT, WAVES_VVAR_DEFAULT,
+)
+from rockoon_drift.timeutil import parse_time_utc, Window, window_with_margin, intersect_windows, adjust_requested_to_available
+from rockoon_drift.netcdf_utils import nc_time_bounds
+from rockoon_drift.cmems_cli import make_request, subset_to_netcdf
+from rockoon_drift.opendrift_runner import DriftRunConfig, run_drift
+from rockoon_drift.outputs import export_csvs, export_pretty_map
+from rockoon_drift.manifest import RunManifest, write_manifest
+
+def _parse_windage_list(s: str) -> list[float]:
+    out: list[float] = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(float(part))
+    return out
+
+def main():
+    ap = argparse.ArgumentParser(description="CMEMS → OpenDrift drift simulation after sea landing")
+    ap.add_argument("--lon", type=float, required=True)
+    ap.add_argument("--lat", type=float, required=True)
+    ap.add_argument("--time-utc", type=str, required=True, help="e.g. 2025-09-07T10:30:00 or 'now'")
+    ap.add_argument("--hours", type=float, default=6.0)
+    ap.add_argument("--dt", type=int, default=600)
+    ap.add_argument("--dt-out", type=int, default=600)
+    ap.add_argument("--radius-km", type=float, default=120.0)
+
+    ap.add_argument("--curr-id", type=str, default=CURR_DATASET_DEFAULT)
+    ap.add_argument("--curr-u", type=str, default=CURR_UVAR_DEFAULT)
+    ap.add_argument("--curr-v", type=str, default=CURR_VVAR_DEFAULT)
+
+    ap.add_argument("--wind-id", type=str, default=WIND_DATASET_DEFAULT)
+    ap.add_argument("--wind-u", type=str, default=WIND_UVAR_DEFAULT)
+    ap.add_argument("--wind-v", type=str, default=WIND_VVAR_DEFAULT)
+    ap.add_argument("--const-wind-only", action="store_true", help="skip wind download; use constant wind only")
+
+    ap.add_argument("--waves-id", type=str, default=WAVES_DATASET_DEFAULT)
+    ap.add_argument("--waves-u", type=str, default=WAVES_UVAR_DEFAULT)
+    ap.add_argument("--waves-v", type=str, default=WAVES_VVAR_DEFAULT)
+    ap.add_argument("--const-waves-only", action="store_true", help="skip waves download; use constant Stokes drift only")
+
+    ap.add_argument("--zmin", type=float, default=0.0)
+    ap.add_argument("--zmax", type=float, default=2.0)
+
+    ap.add_argument("--windage", type=str, default="0.5,1,2,3,4")
+    ap.add_argument("--n-per", type=int, default=200)
+
+    ap.add_argument("--const-wind-u", type=float, default=6.0)
+    ap.add_argument("--const-wind-v", type=float, default=0.0)
+    ap.add_argument("--const-waves-u", type=float, default=0.0, help="eastward Stokes drift (m/s) when using const waves")
+    ap.add_argument("--const-waves-v", type=float, default=0.0, help="northward Stokes drift (m/s) when using const waves")
+
+    ap.add_argument("--cache-dir", type=str, default="./copernicus-cache")
+    ap.add_argument("--outdir", type=str, default="./outputs")
+    ap.add_argument("--force-download", action="store_true")
+    ap.add_argument("--pretty-png", action="store_true")
+    ap.add_argument("--no-waves", action="store_true")
+    ap.add_argument("--no-wind", action="store_true")
+
+    args = ap.parse_args()
+
+    t0 = parse_time_utc(args.time_utc)
+    requested = Window(t0, t0 + timedelta(hours=args.hours))
+    # Download with margins (±6h) like your previous script.
+    dl_window = window_with_margin(center=t0, duration_hours=args.hours, margin_hours=6.0)
+
+    cache_dir = Path(args.cache_dir)
+    outdir = Path(args.outdir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # --- Currents (required) ---
+    curr_req = make_request(
+        dataset_id=args.curr_id,
+        lon=args.lon, lat=args.lat,
+        start_utc=dl_window.start, end_utc=dl_window.end,
+        radius_km=args.radius_km,
+        variables=(args.curr_u, args.curr_v),
+        depth_min=args.zmin, depth_max=args.zmax,
+    )
+    currents_nc = subset_to_netcdf(curr_req, cache_dir=cache_dir, force_download=args.force_download)
+
+    # --- Wind (optional) ---
+    wind_nc = None
+    if args.const_wind_only:
+        print("[INFO] wind download skipped (const wind only mode)")
+    elif not args.no_wind:
+        wind_req = make_request(
+            dataset_id=args.wind_id,
+            lon=args.lon, lat=args.lat,
+            start_utc=dl_window.start, end_utc=dl_window.end,
+            radius_km=args.radius_km,
+            variables=(args.wind_u, args.wind_v),
+        )
+        try:
+            wind_nc = subset_to_netcdf(wind_req, cache_dir=cache_dir, force_download=args.force_download)
+        except Exception as e:
+            raise RuntimeError(
+                "wind download failed and fallback to constant wind is disabled. "
+                "Use --const-wind-only or --no-wind if you want to proceed without wind data."
+            ) from e
+
+    # --- Waves/Stokes (optional) ---
+    waves_nc = None
+    if args.const_waves_only:
+        print("[INFO] waves download skipped (const waves only mode)")
+    elif not args.no_waves:
+        waves_req = make_request(
+            dataset_id=args.waves_id,
+            lon=args.lon, lat=args.lat,
+            start_utc=dl_window.start, end_utc=dl_window.end,
+            radius_km=args.radius_km,
+            variables=(args.waves_u, args.waves_v),
+        )
+        try:
+            waves_nc = subset_to_netcdf(waves_req, cache_dir=cache_dir, force_download=args.force_download)
+        except Exception as e:
+            # Fail fast so we don't silently run with "constant/none" waves.
+            # If you intentionally want to ignore waves, run with --no-waves.
+            raise RuntimeError(
+                "waves download failed (so Stokes drift cannot be used). "
+                "If you want to run without waves, pass --no-waves. "
+                f"Root cause: {e}"
+            ) from e
+
+    # --- Compute common time window across downloaded datasets ---
+    bounds = []
+    ds_meta = {
+        "currents": {"path": str(currents_nc), "time": None},
+        "wind": {"path": str(wind_nc) if wind_nc else None, "time": None},
+        "waves": {"path": str(waves_nc) if waves_nc else None, "time": None},
+    }
+
+    c_b = nc_time_bounds(currents_nc); bounds.append(("currents", c_b))
+    ds_meta["currents"]["time"] = {"tmin": str(c_b.tmin), "tmax": str(c_b.tmax)}
+    if wind_nc:
+        w_b = nc_time_bounds(wind_nc); bounds.append(("wind", w_b))
+        ds_meta["wind"]["time"] = {"tmin": str(w_b.tmin), "tmax": str(w_b.tmax)}
+    if waves_nc:
+        s_b = nc_time_bounds(waves_nc); bounds.append(("waves", s_b))
+        ds_meta["waves"]["time"] = {"tmin": str(s_b.tmin), "tmax": str(s_b.tmax)}
+
+    def _common(active_bounds):
+        return intersect_windows([Window(b.tmin, b.tmax) for _, b in active_bounds]) if active_bounds else None
+
+    common = _common(bounds)
+
+    if common is None:
+        detail = " | ".join([f"{name}=[{b.tmin}..{b.tmax}]" for name, b in bounds])
+        raise RuntimeError(
+            "No common time intersection among datasets and fallback is disabled. "
+            "Adjust your requested time/window or disable a data source with --no-wind/--no-waves/--const-wind-only.\n"
+            f"Bounds: {detail}"
+        )
+
+    # Slide/trim requested window into available range.
+    sim_window = adjust_requested_to_available(requested, common)
+    if sim_window != requested:
+        print("[INFO] requested window adjusted to available dataset range")
+        print(f"       requested=[{requested.start}..{requested.end}]")
+        print(f"       available=[{common.start}..{common.end}]")
+        print(f"       adjusted =[ {sim_window.start}..{sim_window.end} ]")
+
+    include_wind = not args.no_wind
+    include_waves = (not args.no_waves) and (not args.const_waves_only) and (waves_nc is not None)
+
+    if args.const_waves_only:
+        print("[INFO] using constant Stokes drift (waves disabled in readers)")
+
+    cfg = DriftRunConfig(
+        lon=args.lon,
+        lat=args.lat,
+        start_utc=sim_window.start,
+        duration=sim_window.duration,
+        dt_seconds=args.dt,
+        dt_out_seconds=args.dt_out,
+        windage_percents=_parse_windage_list(args.windage),
+        n_per_member=args.n_per,
+        include_wind=include_wind,
+        include_waves=include_waves,
+        const_wind_u=args.const_wind_u,
+        const_wind_v=args.const_wind_v,
+    )
+
+    out_nc = outdir / "balloon_drift.nc"
+    result_nc = run_drift(cfg, currents_nc=currents_nc, wind_nc=wind_nc, waves_nc=waves_nc, out_nc=out_nc)
+
+    # CSV
+    csv_mean = outdir / "balloon_positions_mean.csv"
+    csv_all = outdir / "balloon_positions_all.csv"
+    export_csvs(result_nc, csv_mean, csv_all)
+    print(f"[OK] CSV mean: {csv_mean}")
+    print(f"[OK] CSV all : {csv_all}")
+
+    # Pretty PNG
+    if args.pretty_png:
+        pretty = outdir / "balloon_drift_pretty.png"
+        export_pretty_map(result_nc, currents_nc, pretty)
+
+    manifest = RunManifest(
+        created_utc=datetime.utcnow().isoformat(timespec="seconds"),
+        params={
+            "lon": args.lon, "lat": args.lat, "time_utc": args.time_utc,
+            "requested_hours": args.hours,
+            "sim_start_utc": sim_window.start.isoformat(),
+            "sim_end_utc": sim_window.end.isoformat(),
+            "dt": args.dt, "dt_out": args.dt_out,
+            "windage": cfg.windage_percents,
+            "n_per": cfg.n_per_member,
+            "radius_km": args.radius_km,
+        },
+        datasets=ds_meta,
+        outputs={"netcdf": str(result_nc), "csv_mean": str(csv_mean), "csv_all": str(csv_all)},
+    )
+    write_manifest(outdir / "run_manifest.json", manifest)
+    print(f"[OK] manifest: {outdir / 'run_manifest.json'}")
+    print("[DONE]")
+
+if __name__ == "__main__":
+    main()

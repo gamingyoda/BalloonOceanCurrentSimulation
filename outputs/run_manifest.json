@@ -1,0 +1,50 @@
+{
+  "created_utc": "2025-12-29T01:48:25",
+  "params": {
+    "lon": 135.0,
+    "lat": 33.5,
+    "time_utc": "2025-12-29T10:30:00",
+    "requested_hours": 6.0,
+    "sim_start_utc": "2025-12-29T10:30:00",
+    "sim_end_utc": "2025-12-29T16:30:00",
+    "dt": 600,
+    "dt_out": 600,
+    "windage": [
+      0.5,
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
+    "n_per": 200,
+    "radius_km": 120.0
+  },
+  "datasets": {
+    "currents": {
+      "path": "copernicus-cache/cmems_mod_glo_phy_anfc_0.083deg_PT1H-m_e94a5acf80b05df3.nc",
+      "time": {
+        "tmin": "2025-12-29 05:00:00",
+        "tmax": "2025-12-29 22:00:00"
+      }
+    },
+    "wind": {
+      "path": null,
+      "time": {
+        "tmin": "2025-12-27 05:00:00",
+        "tmax": "2025-12-27 23:00:00"
+      }
+    },
+    "waves": {
+      "path": "copernicus-cache/cmems_mod_glo_wav_anfc_0.083deg_PT3H-i_5307e168c390f2a7.nc",
+      "time": {
+        "tmin": "2025-12-29 06:00:00",
+        "tmax": "2025-12-29 21:00:00"
+      }
+    }
+  },
+  "outputs": {
+    "netcdf": "outputs/balloon_drift.nc",
+    "csv_mean": "outputs/balloon_positions_mean.csv",
+    "csv_all": "outputs/balloon_positions_all.csv"
+  }
+}
