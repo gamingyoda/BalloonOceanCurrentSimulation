@@ -1,12 +1,12 @@
 {
-  "created_utc": "2025-12-29T03:25:42",
+  "created_utc": "2025-12-29T04:14:03",
   "params": {
-    "lon": 135.0,
-    "lat": 33.5,
-    "time_utc": "2025-12-29T10:30:00",
-    "requested_hours": 6.0,
-    "sim_start_utc": "2025-12-29T10:30:00",
-    "sim_end_utc": "2025-12-29T16:30:00",
+    "lon": 133.0369,
+    "lat": 32.9545,
+    "time_utc": "now",
+    "requested_hours": 12.0,
+    "sim_start_utc": "2025-12-29T04:11:00",
+    "sim_end_utc": "2025-12-29T16:11:00",
     "dt": 600,
     "dt_out": 600,
     "windage": [
@@ -23,23 +23,23 @@
   },
   "datasets": {
     "currents": {
-      "path": "copernicus-cache/cmems_mod_glo_phy_anfc_0.083deg_PT1H-m_e94a5acf80b05df3.nc",
+      "path": "copernicus-cache/cmems_mod_glo_phy_anfc_0.083deg_PT1H-m_125afcd8beeb7396.nc",
       "time": {
-        "tmin": "2025-12-29 05:00:00",
+        "tmin": "2025-12-28 23:00:00",
         "tmax": "2025-12-29 22:00:00"
       }
     },
     "wind": {
-      "path": "copernicus-cache/ecmwf_wind_33fdba605e.nc",
+      "path": "copernicus-cache/ecmwf_wind_24a3ec921c.nc",
       "time": {
-        "tmin": "2025-12-29 00:00:00",
+        "tmin": "2025-12-28 18:00:00",
         "tmax": "2025-12-30 00:00:00"
       }
     },
     "waves": {
-      "path": "copernicus-cache/cmems_mod_glo_wav_anfc_0.083deg_PT3H-i_5307e168c390f2a7.nc",
+      "path": "copernicus-cache/cmems_mod_glo_wav_anfc_0.083deg_PT3H-i_ca86568fcf2175bc.nc",
       "time": {
-        "tmin": "2025-12-29 06:00:00",
+        "tmin": "2025-12-29 00:00:00",
         "tmax": "2025-12-29 21:00:00"
       }
     }

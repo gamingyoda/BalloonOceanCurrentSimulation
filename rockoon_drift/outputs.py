@@ -2,6 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 
@@ -155,3 +156,69 @@ def export_simple_png(nc_path: str | Path, png_path: str | Path, dpi: int = 180)
     plt.tight_layout()
     plt.savefig(png_path, dpi=dpi)
     plt.close()
+
+
+def nc_to_geojson(nc_path: str | Path, max_trajectories: int = 80) -> dict:
+    """Convert NetCDF drift output to a compact GeoJSON FeatureCollection.
+
+    - Samples trajectories up to `max_trajectories` to keep payload small.
+    - Includes mean track plus start/end markers.
+    """
+    ds = xr.open_dataset(nc_path)
+    lon = ds["lon"].values  # (time, trajectory)
+    lat = ds["lat"].values
+    times = pd.to_datetime(ds["time"].values)
+
+    features: list[dict] = []
+
+    lon_m = np.nanmean(lon, axis=1)
+    lat_m = np.nanmean(lat, axis=1)
+    mean_coords = [[float(lon_m[i]), float(lat_m[i])] for i in range(len(times)) if np.isfinite(lon_m[i]) and np.isfinite(lat_m[i])]
+    features.append(
+        {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": mean_coords},
+            "properties": {
+                "kind": "mean_track",
+                "start_utc": times[0].isoformat(),
+                "end_utc": times[-1].isoformat(),
+            },
+        }
+    )
+
+    ntraj = lon.shape[1]
+    step = max(1, ntraj // max_trajectories)
+    for j in range(0, ntraj, step):
+        coords = []
+        for i in range(lon.shape[0]):
+            x = lon[i, j]
+            y = lat[i, j]
+            if np.isfinite(x) and np.isfinite(y):
+                coords.append([float(x), float(y)])
+        if not coords:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coords},
+                "properties": {"kind": "member", "trajectory_id": int(j)},
+            }
+        )
+
+    if mean_coords:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": mean_coords[0]},
+                "properties": {"kind": "start"},
+            }
+        )
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": mean_coords[-1]},
+                "properties": {"kind": "end"},
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}

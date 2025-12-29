@@ -7,3 +7,4 @@ copernicus-marine-client
 psutil
 ecmwf-opendata
 cfgrib
+Flask
