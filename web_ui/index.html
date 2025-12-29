@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rockoon漂流シミュレータ</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --panel-border: #e2e8f0;
+      --accent: #2563eb;
+      --text: #0f172a;
+      --muted: #475569;
+      --error: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 18px;
+    }
+    h1 { margin: 0 0 10px 0; font-weight: 600; letter-spacing: 0.4px; }
+    .shell { max-width: 1400px; margin: 0 auto; }
+    .hero {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+      padding: 16px 18px;
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+    }
+    .hero small { color: var(--muted); }
+    .layout { display: grid; grid-template-columns: 360px 1fr; gap: 16px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 12px 24px rgba(15, 23, 42, 0.06);
+    }
+    label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 13px; }
+    input, select {
+      width: 100%;
+      padding: 9px 10px;
+      margin-bottom: 10px;
+      border-radius: 9px;
+      border: 1px solid var(--panel-border);
+      background: #f8fafc;
+      color: var(--text);
+      outline: none;
+      font-family: inherit;
+    }
+    input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    button {
+      width: 100%;
+      padding: 12px;
+      background: linear-gradient(90deg, #2563eb, #1d4ed8);
+      color: #f8fafc;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      transition: transform 0.08s ease, box-shadow 0.08s ease;
+      box-shadow: 0 12px 30px rgba(37, 99, 235, 0.25);
+    }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 14px 34px rgba(37, 99, 235, 0.3); }
+    #map { width: 100%; height: 72vh; border-radius: 12px; border: 1px solid var(--panel-border); background: #f8fafc; }
+    .status { margin-top: 10px; padding: 10px 12px; background: #f8fafc; border: 1px dashed var(--panel-border); border-radius: 10px; color: var(--muted); min-height: 40px; }
+    .status strong { color: var(--text); }
+    .status .error { color: var(--error); }
+    .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+    .chip { padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--panel-border); font-size: 13px; }
+    @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } #map { height: 60vh; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <div>
+        <h1>Rockoon漂流シミュレータ</h1>
+        <small>CMEMS / ECMWF → OpenDrift の簡易ビジュアライザ</small>
+      </div>
+      <div class="chip">地図をクリックして開始位置を設定</div>
+    </div>
+    <div class="layout">
+      <div class="panel">
+        <label>開始時刻 (UTC, 例: 2025-09-07T10:30:00 または now)</label>
+        <input id="timeUtc" type="text" placeholder="now" />
+        <label>経度</label>
+        <input id="lon" type="number" step="0.0001" />
+        <label>緯度</label>
+        <input id="lat" type="number" step="0.0001" />
+        <div style="display:flex; gap:8px;">
+          <div style="flex:1;">
+            <label>シミュ時間 (h)</label>
+            <input id="hours" type="number" step="1" value="12" />
+          </div>
+          <div style="flex:1;">
+            <label>取得半径 (km)</label>
+            <input id="radius" type="number" step="5" value="120" />
+          </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <div style="flex:1;">
+            <label>dt (s)</label>
+            <input id="dt" type="number" step="60" value="600" />
+          </div>
+          <div style="flex:1;">
+            <label>dt_out (s)</label>
+            <input id="dtOut" type="number" step="60" value="600" />
+          </div>
+        </div>
+        <label>風下率 % (カンマ区切り)</label>
+        <input id="windage" type="text" value="0.5,1,2,3,4" />
+        <label>風データソース</label>
+        <select id="windSource">
+          <option value="auto" selected>auto (CMEMS優先→ECMWF)</option>
+          <option value="cmems">CMEMS</option>
+          <option value="ecmwf">ECMWF</option>
+        </select>
+        <label style="display:flex; gap:8px; align-items:center; margin:15px 0;">
+          <input id="prettyPng" type="checkbox" />
+          <span>PNGを保存</span>
+        </label>
+        <button id="runBtn">シミュレーション開始</button>
+        <div class="status" id="status">入力待ち…</div>
+      </div>
+      <div class="panel">
+        <div id="map"></div>
+        <div id="meta" class="meta" style="margin-top:10px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const map = L.map('map', { zoomControl: true }).setView([34.5, 137.0], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+    const markers = { start: null };
+    const overlays = [];
+    const statusBox = document.getElementById('status');
+    const metaBox = document.getElementById('meta');
+    const runBtn = document.getElementById('runBtn');
+
+    function setStatus(msg, isError=false) {
+      statusBox.innerHTML = isError ? `<span class="error">${msg}</span>` : `<strong>${msg}</strong>`;
+    }
+
+    function clearOverlays() {
+      overlays.forEach(o => map.removeLayer(o));
+      overlays.length = 0;
+    }
+
+    map.on('click', (ev) => {
+      const { lat, lng } = ev.latlng;
+      document.getElementById('lat').value = lat.toFixed(4);
+      document.getElementById('lon').value = lng.toFixed(4);
+      if (markers.start) { markers.start.setLatLng(ev.latlng); }
+      else {
+        markers.start = L.marker(ev.latlng, { draggable: true }).addTo(map).bindTooltip('開始');
+        markers.start.on('dragend', (e) => {
+          const pos = e.target.getLatLng();
+          document.getElementById('lat').value = pos.lat.toFixed(4);
+          document.getElementById('lon').value = pos.lng.toFixed(4);
+        });
+      }
+    });
+
+    function defaultTime() {
+      const now = new Date();
+      return now.toISOString().slice(0,19);
+    }
+    document.getElementById('timeUtc').value = 'now';
+    setStatus('地図をクリックするか座標を入力して「シミュレーション開始」を押してください。');
+
+    async function runSimulation() {
+      const payload = {
+        lon: parseFloat(document.getElementById('lon').value),
+        lat: parseFloat(document.getElementById('lat').value),
+        time_utc: document.getElementById('timeUtc').value || 'now',
+        hours: parseFloat(document.getElementById('hours').value || '6'),
+        radius_km: parseFloat(document.getElementById('radius').value || '120'),
+        dt: parseInt(document.getElementById('dt').value || '600', 10),
+        dt_out: parseInt(document.getElementById('dtOut').value || '600', 10),
+        windage: document.getElementById('windage').value || '0.5,1,2,3,4',
+        wind_source: document.getElementById('windSource').value,
+        pretty_png: document.getElementById('prettyPng').checked,
+      };
+
+      if (Number.isNaN(payload.lon) || Number.isNaN(payload.lat)) {
+        setStatus('経度/緯度が必要です。地図をクリックするか手入力してください。', true);
+        return;
+      }
+
+      runBtn.disabled = true;
+      setStatus('シミュレーション実行中… データ取得状況により時間がかかる場合があります。');
+      clearOverlays();
+
+      try {
+        const resp = await fetch('/api/simulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.status !== 'ok') {
+          throw new Error(data.message || 'シミュレーションに失敗しました');
+        }
+        setStatus('完了。マップに描画します。');
+        renderResult(data);
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message || '失敗しました', true);
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    runBtn.addEventListener('click', () => { runSimulation(); });
+
+    function renderResult(data) {
+      clearOverlays();
+      const gj = data.geojson;
+      const styleMember = { color: '#8b9bb7', weight: 1, opacity: 0.35 };
+      const styleMean = { color: '#2dd4bf', weight: 4, opacity: 0.9 };
+      const bounds = [];
+
+      gj.features.forEach((f) => {
+        if (f.geometry.type === 'LineString') {
+          const layer = L.polyline(f.geometry.coordinates.map(c => [c[1], c[0]]), f.properties.kind === 'mean_track' ? styleMean : styleMember).addTo(map);
+          overlays.push(layer);
+          layer.getLatLngs().forEach(pt => bounds.push(pt));
+        }
+        if (f.geometry.type === 'Point') {
+          const color = f.properties.kind === 'start' ? '#38ef7d' : '#f87171';
+          const layer = L.circleMarker([f.geometry.coordinates[1], f.geometry.coordinates[0]], { radius: 6, color, weight: 2, fillOpacity: 0.9 }).addTo(map);
+          layer.bindTooltip(f.properties.kind === 'start' ? '開始' : '終了');
+          overlays.push(layer);
+          bounds.push(layer.getLatLng());
+        }
+      });
+
+      if (bounds.length) {
+        map.fitBounds(bounds, { padding: [18, 18] });
+      }
+
+      metaBox.innerHTML = '';
+      const chips = [
+        `計算期間: ${data.result.sim_window.start} → ${data.result.sim_window.end}`,
+        `風データ: ${data.result.wind_source_used || 'なし'}`,
+        `出力: NetCDF ${data.result.netcdf}`,
+      ];
+      chips.forEach(text => {
+        const div = document.createElement('div');
+        div.className = 'chip';
+        div.textContent = text;
+        metaBox.appendChild(div);
+      });
+    }
+  </script>
+</body>
+</html>

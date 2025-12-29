@@ -11,8 +11,10 @@ Rockoon sea drift simulator: CMEMS -> OpenDrift (OceanDrift)
 
 from __future__ import annotations
 import argparse
+import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from rockoon_drift.constants import (
     CURR_DATASET_DEFAULT, CURR_UVAR_DEFAULT, CURR_VVAR_DEFAULT,
@@ -36,11 +38,11 @@ def _parse_windage_list(s: str) -> list[float]:
             out.append(float(part))
     return out
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="CMEMS → OpenDrift drift simulation after sea landing")
-    ap.add_argument("--lon", type=float, required=True)
-    ap.add_argument("--lat", type=float, required=True)
-    ap.add_argument("--time-utc", type=str, required=True, help="e.g. 2025-09-07T10:30:00 or 'now'")
+    ap.add_argument("--lon", type=float, required=False, help="start longitude (deg)")
+    ap.add_argument("--lat", type=float, required=False, help="start latitude (deg)")
+    ap.add_argument("--time-utc", type=str, required=False, help="e.g. 2025-09-07T10:30:00 or 'now'")
     ap.add_argument("--hours", type=float, default=6.0)
     ap.add_argument("--dt", type=int, default=600)
     ap.add_argument("--dt-out", type=int, default=600)
@@ -85,11 +87,19 @@ def main():
     ap.add_argument("--no-waves", action="store_true")
     ap.add_argument("--no-wind", action="store_true")
 
-    args = ap.parse_args()
+    ap.add_argument("--web", action="store_true", help="start simple web UI instead of running CLI once")
+    ap.add_argument("--web-host", type=str, default="127.0.0.1", help="web UI listen host")
+    ap.add_argument("--web-port", type=int, default=8000, help="web UI listen port")
+    ap.add_argument("--open-browser", action="store_true", help="open browser to the web UI on start")
+    return ap
+
+
+def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
+    if args.lon is None or args.lat is None or args.time_utc is None:
+        raise ValueError("lon, lat, time-utc are required for simulation")
 
     t0 = parse_time_utc(args.time_utc)
     requested = Window(t0, t0 + timedelta(hours=args.hours))
-    # Download with margins (±6h) like your previous script.
     dl_window = window_with_margin(center=t0, duration_hours=args.hours, margin_hours=6.0)
     bbox = bbox_around(args.lon, args.lat, args.radius_km)
 
@@ -98,18 +108,19 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # --- Currents (required) ---
     curr_req = make_request(
         dataset_id=args.curr_id,
-        lon=args.lon, lat=args.lat,
-        start_utc=dl_window.start, end_utc=dl_window.end,
+        lon=args.lon,
+        lat=args.lat,
+        start_utc=dl_window.start,
+        end_utc=dl_window.end,
         radius_km=args.radius_km,
         variables=(args.curr_u, args.curr_v),
-        depth_min=args.zmin, depth_max=args.zmax,
+        depth_min=args.zmin,
+        depth_max=args.zmax,
     )
     currents_nc = subset_to_netcdf(curr_req, cache_dir=cache_dir, force_download=args.force_download)
 
-    # --- Wind (optional) ---
     wind_nc = None
     wind_source_used = None
     if args.const_wind_only:
@@ -118,8 +129,10 @@ def main():
         def _download_wind_cmems() -> Path:
             wind_req = make_request(
                 dataset_id=args.wind_id,
-                lon=args.lon, lat=args.lat,
-                start_utc=dl_window.start, end_utc=dl_window.end,
+                lon=args.lon,
+                lat=args.lat,
+                start_utc=dl_window.start,
+                end_utc=dl_window.end,
                 radius_km=args.radius_km,
                 variables=(args.wind_u, args.wind_v),
             )
@@ -146,7 +159,7 @@ def main():
                     "wind download failed and fallback to constant wind is disabled. "
                     "Use --const-wind-only or --no-wind if you want to proceed without wind data."
                 ) from e
-        else:  # auto
+        else:
             try:
                 wind_nc = _download_wind_cmems()
                 wind_source_used = "cmems"
@@ -161,30 +174,28 @@ def main():
                         "Use --const-wind-only or --no-wind if you want to proceed without wind data."
                     ) from e_ecmwf
 
-    # --- Waves/Stokes (optional) ---
     waves_nc = None
     if args.const_waves_only:
         print("[INFO] waves download skipped (const waves only mode)")
     elif not args.no_waves:
         waves_req = make_request(
             dataset_id=args.waves_id,
-            lon=args.lon, lat=args.lat,
-            start_utc=dl_window.start, end_utc=dl_window.end,
+            lon=args.lon,
+            lat=args.lat,
+            start_utc=dl_window.start,
+            end_utc=dl_window.end,
             radius_km=args.radius_km,
             variables=(args.waves_u, args.waves_v),
         )
         try:
             waves_nc = subset_to_netcdf(waves_req, cache_dir=cache_dir, force_download=args.force_download)
         except Exception as e:
-            # Fail fast so we don't silently run with "constant/none" waves.
-            # If you intentionally want to ignore waves, run with --no-waves.
             raise RuntimeError(
                 "waves download failed (so Stokes drift cannot be used). "
                 "If you want to run without waves, pass --no-waves. "
                 f"Root cause: {e}"
             ) from e
 
-    # --- Compute common time window across downloaded datasets ---
     def _build_bounds(curr_nc, wind_path, waves_path):
         b_list = []
         meta = {
@@ -230,7 +241,6 @@ def main():
             f"Bounds: {detail}"
         )
 
-    # Slide/trim requested window into available range.
     sim_window = adjust_requested_to_available(requested, common)
     if sim_window != requested:
         print("[INFO] requested window adjusted to available dataset range")
@@ -262,14 +272,12 @@ def main():
     out_nc = outdir / "balloon_drift.nc"
     result_nc = run_drift(cfg, currents_nc=currents_nc, wind_nc=wind_nc, waves_nc=waves_nc, out_nc=out_nc)
 
-    # CSV
     csv_mean = outdir / "balloon_positions_mean.csv"
     csv_all = outdir / "balloon_positions_all.csv"
     export_csvs(result_nc, csv_mean, csv_all)
     print(f"[OK] CSV mean: {csv_mean}")
     print(f"[OK] CSV all : {csv_all}")
 
-    # Pretty PNG
     if args.pretty_png:
         pretty = outdir / "balloon_drift_pretty.png"
         export_pretty_map(result_nc, currents_nc, pretty)
@@ -277,11 +285,14 @@ def main():
     manifest = RunManifest(
         created_utc=datetime.utcnow().isoformat(timespec="seconds"),
         params={
-            "lon": args.lon, "lat": args.lat, "time_utc": args.time_utc,
+            "lon": args.lon,
+            "lat": args.lat,
+            "time_utc": args.time_utc,
             "requested_hours": args.hours,
             "sim_start_utc": sim_window.start.isoformat(),
             "sim_end_utc": sim_window.end.isoformat(),
-            "dt": args.dt, "dt_out": args.dt_out,
+            "dt": args.dt,
+            "dt_out": args.dt_out,
             "windage": cfg.windage_percents,
             "n_per": cfg.n_per_member,
             "radius_km": args.radius_km,
@@ -291,9 +302,59 @@ def main():
         datasets=ds_meta,
         outputs={"netcdf": str(result_nc), "csv_mean": str(csv_mean), "csv_all": str(csv_all)},
     )
-    write_manifest(outdir / "run_manifest.json", manifest)
-    print(f"[OK] manifest: {outdir / 'run_manifest.json'}")
+    manifest_path = outdir / "run_manifest.json"
+    write_manifest(manifest_path, manifest)
+    print(f"[OK] manifest: {manifest_path}")
     print("[DONE]")
+
+    return {
+        "netcdf": str(result_nc),
+        "csv_mean": str(csv_mean),
+        "csv_all": str(csv_all),
+        "manifest": str(manifest_path),
+        "sim_window": {
+            "start": sim_window.start.isoformat(),
+            "end": sim_window.end.isoformat(),
+            "duration_hours": sim_window.duration.total_seconds() / 3600.0,
+        },
+        "datasets": ds_meta,
+        "wind_source_used": wind_source_used,
+    }
+
+
+def start_web(args: argparse.Namespace) -> None:
+    from webapp import create_app
+
+    app = create_app(args)
+    url = f"http://{args.web_host}:{args.web_port}"
+    print(f"[WEB] starting UI at {url}")
+    if args.open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            print("[WARN] could not open browser; start manually")
+    app.run(host=args.web_host, port=args.web_port, debug=False)
+
+
+def main():
+    ap = build_arg_parser()
+    args = ap.parse_args()
+
+    if args.web:
+        start_web(args)
+        return
+
+    # デフォルトはWeb UIを起動する。CLIとして使う場合のみlon/lat/timeを指定する。
+    if args.lon is None or args.lat is None or args.time_utc is None:
+        print("[INFO] 引数が指定されていないためWeb UIを起動します。CLIで実行する場合は --lon --lat --time-utc を指定してください。")
+        start_web(args)
+        return
+
+    result = run_simulation(args)
+    print(f"[RESULT] NetCDF : {result['netcdf']}")
+    print(f"[RESULT] CSV mean: {result['csv_mean']}")
+    print(f"[RESULT] CSV all : {result['csv_all']}")
+
 
 if __name__ == "__main__":
     main()
